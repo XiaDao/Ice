@@ -572,6 +572,7 @@ private struct MenuBarSearchItemView: View {
     @ViewBuilder
     private var itemView: some View {
         Image(nsImage: itemImage)
+            .renderingMode(ProcessInfo.processInfo.operatingSystemVersion.majorVersion >= 27 ? .template : .original)
             .frame(
                 width: item.bounds.width,
                 height: dimension

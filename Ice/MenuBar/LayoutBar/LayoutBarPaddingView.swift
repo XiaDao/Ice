@@ -73,6 +73,31 @@ final class LayoutBarPaddingView: NSView {
             return false
         }
 
+        if #available(macOS 27.0, *), let appState = container.appState {
+            guard !draggingSource.item.isControlItem else { return false }
+            let items = arrangedViews.map(\.item)
+            let oldContainer = draggingSource.oldContainerInfo?.container
+            Task {
+                // NSDraggingSession must release the physical mouse first.
+                try? await Task.sleep(for: .milliseconds(150))
+                do {
+                    try await ItemReorderer27.move(item: draggingSource.item, section: MacOS27Section(container.section), displayed: items, appState: appState)
+                } catch {
+                    Logger.default.error("Layout reorder failed: \(error, privacy: .public)")
+                    let alert = NSAlert(error: error)
+                    alert.runModal()
+                }
+                await appState.itemManager.cacheItemsRegardless()
+                container.canSetArrangedViews = true
+                container.setArrangedViews(items: appState.itemManager.itemCache[container.section])
+                if let oldContainer, oldContainer !== container {
+                    oldContainer.canSetArrangedViews = true
+                    oldContainer.setArrangedViews(items: appState.itemManager.itemCache[oldContainer.section])
+                }
+            }
+            return true
+        }
+
         if let index = arrangedViews.firstIndex(of: draggingSource) {
             if arrangedViews.count == 1 {
                 Task {

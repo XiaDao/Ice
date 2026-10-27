@@ -33,7 +33,8 @@ struct MenuBarItemContainer<Content: View>: View {
     }
 
     private var foreground: Color {
-        colorInfo?.isBright == true ? .black : .white
+        if #available(macOS 27.0, *), case .automatic = accessor { return .primary }
+        return colorInfo?.isBright == true ? .black : .white
     }
 
     private var configuration: MenuBarAppearancePartialConfiguration {
@@ -63,8 +64,19 @@ struct MenuBarItemContainer<Content: View>: View {
 
     @ViewBuilder
     private var contentBackground: some View {
-        if appState.activeSpace.isFullscreen {
+        if #available(macOS 27.0, *), case .automatic = accessor {
+            // Layout belongs to the settings appearance. A sampled CGColor
+            // lags a system theme transition and can briefly hide every glyph.
+            Color(nsColor: .windowBackgroundColor)
+        } else if appState.activeSpace.isFullscreen {
             Color.black
+        } else if #available(macOS 27.0, *), case .manual = accessor {
+            // Ice Bar: preserve the backdrop through a real visual-effect
+            // material, tinted from the menu bar rather than solid window white.
+            VisualEffectView(material: .hudWindow, blendingMode: .behindWindow)
+            if let colorInfo {
+                Color(cgColor: colorInfo.color).opacity(0.55)
+            }
         } else if let colorInfo {
             Color(cgColor: colorInfo.color)
         } else {

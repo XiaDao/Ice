@@ -71,6 +71,13 @@ final class AppPermissions: ObservableObject {
 
     /// Stops running all permissions checks.
     func stopAllChecks() {
+        if #available(macOS 26.0, *) {
+            // ScreenCaptureKit may still be checking the optional recording
+            // grant when setup starts with only Accessibility. Keep observing
+            // it so granting permission updates the layout without a restart.
+            accessibility.stopCheck()
+            return
+        }
         logger.info("Stopping all permissions checks")
         for permission in allPermissions {
             permission.stopCheck()

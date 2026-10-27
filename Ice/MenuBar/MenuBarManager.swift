@@ -119,8 +119,8 @@ final class MenuBarManager: ObservableObject {
                     let appState,
                     case .focusedApp = appState.settings.general.rehideStrategy,
                     let hiddenSection = section(withName: .hidden),
-                    let screen = appState.eventManager.bestScreen(appState: appState),
-                    !appState.eventManager.isMouseInsideMenuBar(appState: appState, screen: screen)
+                    let screen = appState.hidEventManager.bestScreen(appState: appState),
+                    !appState.hidEventManager.isMouseInsideMenuBar(appState: appState, screen: screen)
                 {
                     Task {
                         try await Task.sleep(for: .seconds(0.1))
@@ -151,6 +151,13 @@ final class MenuBarManager: ObservableObject {
             .receive(on: DispatchQueue.main)
             .sink { [weak self] _ in
                 guard let self, let appState else {
+                    return
+                }
+
+                // macOS 27 folds the items that do not fit behind its own overflow button,
+                // so shown items never cover the application menus. Activating Ice there only
+                // took keyboard focus from the frontmost application (measured).
+                if #available(macOS 27.0, *) {
                     return
                 }
 
@@ -228,6 +235,14 @@ final class MenuBarManager: ObservableObject {
             settingsWindow.isVisible,
             let screen = settingsWindow.screen
         else {
+            return
+        }
+
+        if #available(macOS 27.0, *) {
+            let info = MenuBarAverageColorInfo(color: IceBarColorManager.layoutColor27(), source: .menuBarWindow)
+            if averageColorInfo != info {
+                averageColorInfo = info
+            }
             return
         }
 

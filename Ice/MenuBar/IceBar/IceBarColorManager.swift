@@ -4,6 +4,7 @@
 //
 
 import Combine
+import ScreenCaptureKit
 import SwiftUI
 
 final class IceBarColorManager: ObservableObject {
@@ -12,6 +13,7 @@ final class IceBarColorManager: ObservableObject {
     private weak var iceBarPanel: IceBarPanel?
 
     private var windowImage: CGImage?
+    private var colorTask27: Task<Void, Never>?
 
     private var cancellables = Set<AnyCancellable>()
 
@@ -110,6 +112,9 @@ final class IceBarColorManager: ObservableObject {
     }
 
     private func updateWindowImage(for screen: NSScreen) {
+        if #available(macOS 27.0, *) {
+            return
+        }
         let windows = WindowInfo.createWindows(option: .onScreen)
         let displayID = screen.displayID
 
@@ -132,6 +137,10 @@ final class IceBarColorManager: ObservableObject {
     }
 
     private func updateColorInfo(with frame: CGRect, screen: NSScreen) {
+        if #available(macOS 27.0, *) {
+            updateColorInfo27(with: frame, screen: screen)
+            return
+        }
         guard let image = windowImage else {
             return
         }
@@ -160,5 +169,43 @@ final class IceBarColorManager: ObservableObject {
     func updateAllProperties(with frame: CGRect, screen: NSScreen) {
         updateWindowImage(for: screen)
         updateColorInfo(with: frame, screen: screen)
+    }
+
+    /// The layout editor keeps an opaque neutral surface for its original
+    /// bitmap previews; the floating Ice Bar uses the sampled material instead.
+    static func layoutColor27() -> CGColor {
+        var color = NSColor.windowBackgroundColor
+        NSApp.effectiveAppearance.performAsCurrentDrawingAppearance {
+            color = NSColor.windowBackgroundColor.usingColorSpace(.sRGB) ?? color
+        }
+        return color.cgColor
+    }
+
+    /// Samples only a narrow background strip at the top of the correct display.
+    /// No per-item WindowServer windows or opaque system-appearance colour needed.
+    @available(macOS 27.0, *)
+    private func updateColorInfo27(with frame: CGRect, screen: NSScreen) {
+        colorTask27?.cancel()
+        colorTask27 = Task { @MainActor [weak self] in
+            do {
+                let content = try await SCShareableContent.excludingDesktopWindows(false, onScreenWindowsOnly: true)
+                guard let display = content.displays.first(where: { $0.displayID == screen.displayID }) else { return }
+                let ownPID = ProcessInfo.processInfo.processIdentifier
+                let ownWindows = content.windows.filter { $0.owningApplication?.processID == ownPID }
+                let filter = SCContentFilter(display: display, excludingWindows: ownWindows)
+                let width = min(screen.frame.width, 180)
+                let x = (frame.midX - screen.frame.minX - width / 2).clamped(to: 0...(screen.frame.width - width))
+                let configuration = SCStreamConfiguration()
+                configuration.sourceRect = CGRect(x: x, y: 1, width: width, height: 2)
+                configuration.width = Int(width * CGFloat(filter.pointPixelScale))
+                configuration.height = max(1, Int(2 * CGFloat(filter.pointPixelScale)))
+                configuration.showsCursor = false
+                let image = try await SCScreenshotManager.captureImage(contentFilter: filter, configuration: configuration)
+                guard !Task.isCancelled, let color = image.averageColor() else { return }
+                self?.colorInfo = MenuBarAverageColorInfo(color: color, source: .menuBarWindow)
+            } catch {
+                // Keep the last usable tint if a display changes during capture.
+            }
+        }
     }
 }

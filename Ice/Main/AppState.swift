@@ -40,14 +40,70 @@ final class AppState: ObservableObject {
     /// Global cache for menu bar item images.
     let imageCache = MenuBarItemImageCache()
 
-    /// Manager for events received by the app.
-    let eventManager = EventManager()
+    /// Manager for input events received by the app.
+    let hidEventManager = HIDEventManager()
 
     /// Manager for app updates.
     let updatesManager = UpdatesManager()
 
     /// Manager for user notifications.
     let userNotificationManager = UserNotificationManager()
+
+    /// Storage for ``concealer27``, typed loosely so the property exists on every macOS.
+    private var concealer27Storage: AnyObject?
+
+    /// Hides menu bar items on macOS 27.
+    @available(macOS 27.0, *)
+    var concealer27: Concealer27 {
+        if let concealer = concealer27Storage as? Concealer27 {
+            return concealer
+        }
+        let concealer = Concealer27()
+        concealer27Storage = concealer
+        return concealer
+    }
+
+    /// Storage for ``captureWatcher27``, typed loosely so the property exists on every macOS.
+    private var captureWatcher27Storage: AnyObject?
+
+    /// Watches whether the camera or the microphone is in use on macOS 27.
+    @available(macOS 27.0, *)
+    var captureWatcher27: CaptureWatcher27 {
+        if let watcher = captureWatcher27Storage as? CaptureWatcher27 {
+            return watcher
+        }
+        let watcher = CaptureWatcher27()
+        captureWatcher27Storage = watcher
+        return watcher
+    }
+
+    /// Storage for ``captureIndicatorPanel27``, typed loosely so the property exists on every macOS.
+    private var captureIndicatorPanel27Storage: AnyObject?
+
+    /// Draws Ice's own camera and microphone indicator on macOS 27.
+    @available(macOS 27.0, *)
+    var captureIndicatorPanel27: CaptureIndicatorPanel27 {
+        if let panel = captureIndicatorPanel27Storage as? CaptureIndicatorPanel27 {
+            return panel
+        }
+        let panel = CaptureIndicatorPanel27(appState: self)
+        captureIndicatorPanel27Storage = panel
+        return panel
+    }
+
+    /// Storage for ``itemImageStore27``, typed loosely so the property exists on every macOS.
+    private var itemImageStore27Storage: AnyObject?
+
+    /// Images of menu bar items on macOS 27.
+    @available(macOS 27.0, *)
+    var itemImageStore27: ItemImageStore27 {
+        if let store = itemImageStore27Storage as? ItemImageStore27 {
+            return store
+        }
+        let store = ItemImageStore27()
+        itemImageStore27Storage = store
+        return store
+    }
 
     /// Storage for internal observers.
     private var cancellables = Set<AnyCancellable>()
@@ -62,12 +118,22 @@ final class AppState: ObservableObject {
         settings.performSetup(with: self)
         menuBarManager.performSetup(with: self)
 
-        if #available(macOS 26.0, *) {
+        if #available(macOS 27.0, *) {
+            // macOS 27 has no item windows: bounds come from Accessibility, and the
+            // owning process is known directly, without the item service.
+            Bridging.syntheticWindowBoundsProvider = MenuBarItemProvider27.currentBounds(for:)
+        } else if #available(macOS 26.0, *) {
             await MenuBarItemService.Connection.shared.start()
         }
 
         appearanceManager.performSetup(with: self)
-        eventManager.performSetup(with: self)
+        hidEventManager.performSetup(with: self)
+        if #available(macOS 27.0, *) {
+            // Discover identities before hiding. Some applications stop publishing
+            // their extras while concealed; hiding first loses them on every launch.
+            _ = await MenuBarItemProvider27.items()
+            concealer27.performSetup(with: self)
+        }
         await itemManager.performSetup(with: self)
         imageCache.performSetup(with: self)
         updatesManager.performSetup(with: self)
@@ -148,7 +214,7 @@ final class AppState: ObservableObject {
             }
             .store(in: &c)
 
-        eventManager.$isDraggingMenuBarItem
+        hidEventManager.$isDraggingMenuBarItem
             .removeDuplicates()
             .sink { [weak self] isDragging in
                 self?.isDraggingMenuBarItem = isDragging

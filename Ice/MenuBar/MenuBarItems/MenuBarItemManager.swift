@@ -77,6 +77,24 @@ final class MenuBarItemManager: ObservableObject {
             }
             .store(in: &c)
 
+        if #available(macOS 27.0, *) {
+            // Accessibility reports frames only for the active menu bar, so read the
+            // items again soon after it moves to another display.
+            NSWorkspace.shared.notificationCenter
+                .publisher(for: NSWorkspace.didActivateApplicationNotification)
+                // The menu bar takes about a second to move (measured).
+                .debounce(for: 1.5, scheduler: DispatchQueue.main)
+                .sink { [weak self] _ in
+                    guard let self else {
+                        return
+                    }
+                    Task {
+                        await self.cacheItemsIfNeeded()
+                    }
+                }
+                .store(in: &c)
+        }
+
         cancellables = c
     }
 
@@ -324,6 +342,11 @@ extension MenuBarItemManager {
             await cacheActor.clearCachedItemWindowIDs() // Ensure next cache isn't skipped.
         }
 
+        guard itemCache != context.cache else {
+            logger.debug("Not updating menu bar item cache, as items haven't changed")
+            return
+        }
+
         itemCache = context.cache
         logger.debug("Updated menu bar item cache")
     }
@@ -340,6 +363,7 @@ extension MenuBarItemManager {
                 return
             }
 
+            if #available(macOS 27.0, *), appState?.concealer27.isReordering == true { return }
             guard !lastMoveOperationOccurred(within: .seconds(1)) else {
                 logger.debug("Skipping menu bar item cache due to recent item movement")
                 return
@@ -351,6 +375,29 @@ extension MenuBarItemManager {
             let itemWindowIDs = currentItemWindowIDs ?? items.reversed().map { $0.windowID }
             await cacheActor.updateCachedItemWindowIDs(itemWindowIDs)
 
+            if #available(macOS 27.0, *), let appState {
+                guard !appState.concealer27.isReordering else { return }
+                // On macOS 27 the saved layout, not the order on the bar, places items in sections,
+                // so Ice's dividers are not needed. Accessibility reports them only on the display
+                // Ice launched on, and requiring them emptied the cache on the other display.
+                // An upgrade from an earlier macOS arrives with its sections in the bar's order and
+                // nowhere else, so the first readable bar is where they come from.
+                appState.concealer27.seedLayoutIfNeeded(items: items)
+                let cache = appState.concealer27.cacheFromSavedLayout(items: items, displayID: displayID)
+                if itemCache != cache {
+                    itemCache = cache
+                    logger.info(
+                        """
+                        macOS 27 cache: \
+                        visible=\(cache[.visible].map(\.tag.namespace.description).joined(separator: ","), privacy: .public) \
+                        hidden=\(cache[.hidden].map(\.tag.namespace.description).joined(separator: ","), privacy: .public) \
+                        alwaysHidden=\(cache[.alwaysHidden].map(\.tag.namespace.description).joined(separator: ","), privacy: .public)
+                        """
+                    )
+                }
+                return
+            }
+
             guard let controlItems = ControlItemPair(items: &items) else {
                 // ???: Is clearing the cache the best thing to do here?
                 logger.warning("Missing control item for hidden section, clearing menu bar item cache")
@@ -358,7 +405,11 @@ extension MenuBarItemManager {
                 return
             }
 
-            await enforceControlItemOrder(controlItems: controlItems)
+            // Moving items is not supported on macOS 27 yet (plan 2), so the dividers
+            // stay where macOS placed them.
+            if #unavailable(macOS 27.0) {
+                await enforceControlItemOrder(controlItems: controlItems)
+            }
             await uncheckedCacheItems(items: items, controlItems: controlItems, displayID: displayID)
         }
     }
@@ -370,6 +421,16 @@ extension MenuBarItemManager {
     /// the hidden and always-hidden sections are correctly ordered,
     /// arranging them into valid positions if needed.
     func cacheItemsIfNeeded() async {
+        if #available(macOS 27.0, *) {
+            // There is no item window list on macOS 27. A reorder keeps the synthetic
+            // identifiers, so the signature also carries each item's position.
+            let items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
+            let signature = items.map { $0.windowID &+ UInt32(truncatingIfNeeded: Int($0.bounds.minX)) }
+            if await cacheActor.cachedItemWindowIDs != signature {
+                await cacheItemsRegardless(signature)
+            }
+            return
+        }
         let itemWindowIDs = Bridging.getMenuBarWindowList(option: [.itemsOnly, .activeSpace])
         if await cacheActor.cachedItemWindowIDs != itemWindowIDs {
             await cacheItemsRegardless(itemWindowIDs)
@@ -587,7 +648,10 @@ extension MenuBarItemManager {
             throw EventError.eventCreationFailure(item)
         }
 
-        let firstLocation = EventTap.Location.pid(getEventPID(for: item))
+        let pid = getEventPID(for: item)
+        event.setTargetPID(pid)
+
+        let firstLocation = EventTap.Location.pid(pid)
         let secondLocation = EventTap.Location.sessionEventTap
 
         var count = count
@@ -595,12 +659,15 @@ extension MenuBarItemManager {
 
         let timeoutTask = Task(timeout: timeout * count) {
             try await withCheckedThrowingContinuation { continuation in
-                // Listen for the following events at the first location and
-                // perform the following actions:
+                // Listen for the following events at the first location
+                // and perform the following actions:
                 //
-                // - Entry event: Decrement the count and post the real event
-                //   to the second location.
-                // - Exit event: Disable the tap and resume the continuation.
+                // - Entry event: Decrement the count and post the real
+                //   event to the second location (handled in EventTap 2).
+                // - Exit event: Resume the continuation.
+                //
+                // These events serve as start (or continue) and stop
+                // signals, and are discarded.
                 let eventTap1 = EventTap(
                     label: "EventTap 1",
                     type: .null,
@@ -621,11 +688,9 @@ extension MenuBarItemManager {
                     return rEvent
                 }
 
-                // Listen for the real event at the second location and
-                // perform the following actions:
-                //
-                // - If count <= 0: Disable the tap and post the exit event.
-                // - Otherwise: Repost the entry event to start another pass.
+                // Listen for the real event at the second location and,
+                // depending on the count, post either the entry or exit
+                // event to the first location (handled in EventTap 1).
                 let eventTap2 = EventTap(
                     label: "EventTap 2",
                     type: event.type,
@@ -642,6 +707,7 @@ extension MenuBarItemManager {
                     } else {
                         entryEvent.post(to: firstLocation)
                     }
+                    rEvent.setTargetPID(pid)
                     return rEvent
                 }
 
@@ -701,7 +767,10 @@ extension MenuBarItemManager {
             throw EventError.eventCreationFailure(item)
         }
 
-        let firstLocation = EventTap.Location.pid(getEventPID(for: item))
+        let pid = getEventPID(for: item)
+        event.setTargetPID(pid)
+
+        let firstLocation = EventTap.Location.pid(pid)
         let secondLocation = EventTap.Location.sessionEventTap
 
         var count = count
@@ -709,45 +778,38 @@ extension MenuBarItemManager {
 
         let timeoutTask = Task(timeout: timeout * count) {
             try await withCheckedThrowingContinuation { continuation in
-                // Listen for the following events at the first location and
-                // perform the following actions:
+                // Listen for the following events at the first location
+                // and perform the following actions:
                 //
-                // - Entry event: Decrement the count and post the real event
-                //   to the second location.
-                // - Exit event: Disable the tap and resume the continuation.
-                // - Real event:
-                //   - If count <= 0: Post the exit event.
-                //   - Otherwise: Repost the entry event to start another pass.
+                // - Entry event: Decrement the count and post the real
+                //   event to the second location (handled in EventTap 2).
+                // - Exit event: Resume the continuation.
+                //
+                // These events serve as start (or continue) and stop
+                // signals, and are discarded.
                 let eventTap1 = EventTap(
                     label: "EventTap 1",
-                    types: [.null, event.type],
+                    type: .null,
                     location: firstLocation,
                     placement: .headInsertEventTap,
                     option: .defaultTap
                 ) { tap, rEvent in
-                    switch rEvent.type {
-                    case .null where rEvent.matches(entryEvent, byIntegerFields: [.eventSourceUserData]):
+                    if rEvent.matches(entryEvent, byIntegerFields: [.eventSourceUserData]) {
                         count -= 1
                         event.post(to: secondLocation)
                         return nil
-                    case .null where rEvent.matches(exitEvent, byIntegerFields: [.eventSourceUserData]):
+                    }
+                    if rEvent.matches(exitEvent, byIntegerFields: [.eventSourceUserData]) {
                         tap.disable()
                         continuation.resume()
                         return nil
-                    case event.type where rEvent.matches(event, byIntegerFields: CGEventField.menuBarItemEventFields):
-                        if count <= 0 {
-                            exitEvent.post(to: firstLocation)
-                        } else {
-                            entryEvent.post(to: firstLocation)
-                        }
-                        return rEvent
-                    default:
-                        return rEvent
                     }
+                    return rEvent
                 }
 
-                // Listen for the real event at the second location and forward
-                // it back to the first location. If count <= 0, disable the tap.
+                // Listen for the real event at the second location and
+                // post the real event to the first location (handled in
+                // EventTap 3).
                 let eventTap2 = EventTap(
                     label: "EventTap 2",
                     type: event.type,
@@ -762,21 +824,48 @@ extension MenuBarItemManager {
                         tap.disable()
                     }
                     event.post(to: firstLocation)
+                    rEvent.setTargetPID(pid)
+                    return rEvent
+                }
+
+                // Listen for the real event at the first location and,
+                // depending on the count, post either the entry or exit
+                // event to the first location (handled in EventTap 1).
+                let eventTap3 = EventTap(
+                    label: "EventTap 3",
+                    type: event.type,
+                    location: firstLocation,
+                    placement: .headInsertEventTap,
+                    option: .listenOnly
+                ) { tap, rEvent in
+                    guard rEvent.matches(event, byIntegerFields: CGEventField.menuBarItemEventFields) else {
+                        return rEvent
+                    }
+                    if count <= 0 {
+                        tap.disable()
+                        exitEvent.post(to: firstLocation)
+                    } else {
+                        entryEvent.post(to: firstLocation)
+                    }
+                    rEvent.setTargetPID(pid)
                     return rEvent
                 }
 
                 // Keep the taps alive.
                 eventTaps.append(eventTap1)
                 eventTaps.append(eventTap2)
+                eventTaps.append(eventTap3)
 
                 Task {
                     await withTaskCancellationHandler {
                         eventTap1.enable()
                         eventTap2.enable()
+                        eventTap3.enable()
                         entryEvent.post(to: firstLocation)
                     } onCancel: {
                         eventTap1.disable()
                         eventTap2.disable()
+                        eventTap3.disable()
                         continuation.resume(throwing: CancellationError())
                     }
                 }
@@ -881,6 +970,17 @@ extension MenuBarItemManager {
         }
     }
 
+    /// The tolerance used when checking whether an item has reached its
+    /// destination.
+    ///
+    /// Window bounds come from the window server and carry sub-point values on a
+    /// scaled display, so two items that are visually flush can report edges that
+    /// differ by a fraction. Comparing them exactly made a move that had in fact
+    /// succeeded look like a failure, sending it around the retry loop again — up
+    /// to `maxAttempts` times, each with its own wait. A tolerance well under the
+    /// width of the narrowest menu bar item cannot accept a wrong position.
+    private nonisolated static let positionTolerance: CGFloat = 2
+
     /// Returns a Boolean value that indicates whether the given menu bar
     /// item has the correct position, relative to the given destination.
     private nonisolated func itemHasCorrectPosition(
@@ -889,9 +989,10 @@ extension MenuBarItemManager {
     ) async throws -> Bool {
         let itemBounds = try await getCurrentBounds(for: item)
         let targetBounds = try await getCurrentBounds(for: destination.targetItem)
+        let tolerance = Self.positionTolerance
         return switch destination {
-        case .leftOfItem: itemBounds.maxX == targetBounds.minX
-        case .rightOfItem: itemBounds.minX == targetBounds.maxX
+        case .leftOfItem: abs(itemBounds.maxX - targetBounds.minX) <= tolerance
+        case .rightOfItem: abs(itemBounds.minX - targetBounds.maxX) <= tolerance
         }
     }
 
@@ -1049,6 +1150,12 @@ extension MenuBarItemManager {
         }
 
         try await waitForUserToPauseInput()
+
+        appState.hidEventManager.stopAll()
+        defer {
+            appState.hidEventManager.startAll()
+        }
+
         try await waitForMoveOperationBuffer()
 
         logger.log(
@@ -1063,11 +1170,9 @@ extension MenuBarItemManager {
             return
         }
 
-        appState.eventManager.stopAll()
         MouseHelpers.hideCursor()
         defer {
             MouseHelpers.showCursor()
-            appState.eventManager.startAll()
         }
 
         let maxAttempts = 8
@@ -1205,9 +1310,9 @@ extension MenuBarItemManager {
             """
         )
 
-        appState.eventManager.stopAll()
+        appState.hidEventManager.stopAll()
         defer {
-            appState.eventManager.startAll()
+            appState.hidEventManager.startAll()
         }
 
         let maxAttempts = 4
@@ -1324,6 +1429,10 @@ extension MenuBarItemManager {
     ///   - item: The item to temporarily show.
     ///   - mouseButton: The mouse button to click the item with.
     func temporarilyShow(item: MenuBarItem, clickingWith mouseButton: CGMouseButton) async {
+        guard let appState else {
+            logger.error("Missing AppState, so not showing \(item.logString, privacy: .public)")
+            return
+        }
         guard let screen = NSScreen.screenWithActiveMenuBar else {
             logger.error("No active menu bar screen, so not showing \(item.logString, privacy: .public)")
             return
@@ -1370,6 +1479,11 @@ extension MenuBarItemManager {
             return
         }
 
+        appState.hidEventManager.stopAll()
+        defer {
+            appState.hidEventManager.startAll()
+        }
+
         logger.debug("Temporarily showing \(item.logString, privacy: .public)")
 
         do {
@@ -1410,6 +1524,10 @@ extension MenuBarItemManager {
     /// If an item is currently showing its interface, this method waits
     /// for the interface to close before hiding the items.
     func rehideTemporarilyShownItems() async {
+        guard let appState else {
+            logger.error("Missing AppState, so not rehiding")
+            return
+        }
         guard !temporarilyShownItemContexts.isEmpty else {
             return
         }
@@ -1429,6 +1547,13 @@ extension MenuBarItemManager {
 
         let items = await MenuBarItem.getMenuBarItems(option: .activeSpace)
         var failedContexts = [TemporarilyShownItemContext]()
+
+        appState.hidEventManager.stopAll()
+        defer {
+            appState.hidEventManager.startAll()
+        }
+
+        await eventSleep(for: .milliseconds(250))
 
         logger.debug("Rehiding temporarily shown items")
 
@@ -1740,6 +1865,11 @@ private extension CGEvent {
         fields.allSatisfy { field in
             getIntegerValueField(field) == other.getIntegerValueField(field)
         }
+    }
+
+    func setTargetPID(_ pid: pid_t) {
+        let targetPID = Int64(pid)
+        setIntegerValueField(.eventTargetUnixProcessID, value: targetPID)
     }
 
     private func setFlags(for type: MenuBarItemEventType) {

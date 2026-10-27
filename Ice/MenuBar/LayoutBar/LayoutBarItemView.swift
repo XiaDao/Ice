@@ -65,10 +65,22 @@ final class LayoutBarItemView: NSView {
         self.appState = appState
 
         // set the frame to the full item frame size; the image will be centered when displayed
-        super.init(frame: CGRect(origin: .zero, size: item.bounds.size))
+        let size: CGSize
+        if #available(macOS 27.0, *), item.bounds.isEmpty {
+            size = CGSize(width: 40, height: 24)
+        } else {
+            size = item.bounds.size
+        }
+        super.init(frame: CGRect(origin: .zero, size: size))
         unregisterDraggedTypes()
 
         self.toolTip = item.displayName
+        if #available(macOS 27.0, *) {
+            // Lets Scripts/macos27/verify-layout.sh find the item.
+            setAccessibilityElement(true)
+            setAccessibilityRole(.image)
+            setAccessibilityLabel(item.displayName)
+        }
         self.isEnabled = item.isMovable
 
         configureCancellables()
@@ -113,8 +125,14 @@ final class LayoutBarItemView: NSView {
 
     override func draw(_ dirtyRect: NSRect) {
         if !isDraggingPlaceholder {
-            cachedImage?.nsImage.draw(
-                in: bounds,
+            let imageBounds: CGRect
+            if #available(macOS 27.0, *), cachedImage == nil {
+                imageBounds = CGRect(x: bounds.midX - 9, y: bounds.midY - 9, width: 18, height: 18)
+            } else {
+                imageBounds = bounds
+            }
+            layoutImage?.draw(
+                in: imageBounds,
                 from: .zero,
                 operation: .sourceOver,
                 fraction: isEnabled ? 1.0 : 0.67
@@ -139,6 +157,32 @@ final class LayoutBarItemView: NSView {
         }
     }
 
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
+    }
+
+    /// A screenshot's RGB colour belongs to the appearance at capture time.
+    /// Like the Ice Bar, render its alpha as a glyph in the current label colour.
+    private var layoutImage: NSImage? {
+        guard #available(macOS 27.0, *) else { return cachedImage?.nsImage }
+        let image = cachedImage?.nsImage ?? NSImage(systemSymbolName: "square.dashed", accessibilityDescription: item.displayName)
+        guard let image, let mask = image.cgImage(forProposedRect: nil, context: nil, hints: nil) else { return image }
+        var colour = NSColor.labelColor.cgColor
+        effectiveAppearance.performAsCurrentDrawingAppearance {
+            colour = NSColor.labelColor.cgColor
+        }
+        return NSImage(size: image.size, flipped: false) { rect in
+            guard let context = NSGraphicsContext.current?.cgContext else { return false }
+            context.saveGState()
+            context.clip(to: rect, mask: mask)
+            context.setFillColor(colour)
+            context.fill(rect)
+            context.restoreGState()
+            return true
+        }
+    }
+
     override func mouseDragged(with event: NSEvent) {
         super.mouseDragged(with: event)
 
@@ -159,7 +203,7 @@ final class LayoutBarItemView: NSView {
         pasteboardItem.setData(Data(), forType: .layoutBarItem)
 
         let draggingItem = NSDraggingItem(pasteboardWriter: pasteboardItem)
-        draggingItem.setDraggingFrame(bounds, contents: cachedImage?.nsImage)
+        draggingItem.setDraggingFrame(bounds, contents: layoutImage)
 
         beginDraggingSession(with: [draggingItem], event: event, source: self)
     }
