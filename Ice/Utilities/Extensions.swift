@@ -552,12 +552,25 @@ extension NSScreen {
     /// Returns the frame of the application menu on this screen.
     func getApplicationMenuFrame() -> CGRect? {
         let displayBounds = CGDisplayBounds(displayID)
+        let ownerPID = NSWorkspace.shared.menuBarOwningApplication?.processIdentifier
 
         guard let menuBar = AXHelpers.applicationMenuBar(at: displayBounds.origin) else {
             return nil
         }
 
-        let applicationMenuFrame = AXHelpers.children(for: menuBar).reduce(into: CGRect.null) { result, child in
+        let children = AXHelpers.children(for: menuBar)
+        if #available(macOS 27.0, *) {
+            // A disabled title is still drawn. Filtering on AXEnabled (which may also be
+            // unavailable while an app starts or tracks a menu) shortened the protected area.
+            // Refuse incomplete geometry and a read that straddles a menu-owner change.
+            let frame = ApplicationMenuArea27.measuredFrame(titleFrames: children.map { AXHelpers.frame(for: $0) })
+            guard let ownerPID, ownerPID == NSWorkspace.shared.menuBarOwningApplication?.processIdentifier else {
+                return nil
+            }
+            return frame
+        }
+
+        let applicationMenuFrame = children.reduce(into: CGRect.null) { result, child in
             if AXHelpers.isEnabled(child), let childFrame = AXHelpers.frame(for: child) {
                 result = result.union(childFrame)
             }
@@ -565,14 +578,6 @@ extension NSScreen {
 
         if applicationMenuFrame.width <= 0 || applicationMenuFrame.isNull {
             return nil
-        }
-
-        // The Accessibility API answers with the menu bar of whichever display has the menus, so
-        // the frame that comes back for another display is in the wrong coordinates. On macOS 27
-        // it is read from the application that owns the menu bar and corrected for the display
-        // being asked about — notch and all — by `ApplicationMenuArea27`, so the frame is kept.
-        if #available(macOS 27.0, *) {
-            return applicationMenuFrame
         }
 
         // Before that, a long menu bar carrying on past a notch made the frame useless for every

@@ -661,10 +661,17 @@ extension HIDEventManager {
             if let location = MouseHelpers.locationCoreGraphics {
                 lastEmptyMenuBarPoints[screen.displayID] = location
             }
+            let ownerPID = NSWorkspace.shared.menuBarOwningApplication?.processIdentifier
             Task {
                 try await Task.sleep(for: .seconds(delay))
-                // Make sure the mouse is still inside.
-                guard isMouseInsideEmptyMenuBarSpace(appState: appState, screen: screen) else {
+                // A click or an application switch can invalidate a queued reveal even if the
+                // pointer has not moved. Do not open Ice over the newly active app's menu.
+                guard
+                    isEnabled,
+                    appState.menuBarManager.showOnHoverAllowed,
+                    ownerPID == NSWorkspace.shared.menuBarOwningApplication?.processIdentifier,
+                    isMouseInsideEmptyMenuBarSpace(appState: appState, screen: screen)
+                else {
                     return
                 }
                 hiddenSection.show()
@@ -798,14 +805,22 @@ extension HIDEventManager {
         guard let mouseLocation = MouseHelpers.locationCoreGraphics else {
             return false
         }
-        guard var applicationMenuFrame = screen.getApplicationMenuFrame() else {
-            return false
-        }
         if #available(macOS 27.0, *) {
             // The menus come from the application that owns the menu bar, so the frame is in its
             // display's coordinates whichever display is asked about. See `ApplicationMenuArea27`.
-            return Self.applicationMenuArea27(menuFrame: applicationMenuFrame, screen: screen)
-                .contains(mouseLocation)
+            let measuredArea = screen.getApplicationMenuFrame().map { Self.applicationMenuArea27(menuFrame: $0, screen: screen) }
+            let display = CGDisplayBounds(screen.displayID)
+            let barBounds = CGRect(
+                x: display.minX, y: display.minY, width: display.width,
+                height: max(
+                    screen.getMenuBarHeight() ?? 0,
+                    max(screen.frame.maxY - screen.visibleFrame.maxY, NSStatusBar.system.thickness)
+                )
+            )
+            return ApplicationMenuArea27.contains(point: mouseLocation, measuredArea: measuredArea, barBounds: barBounds)
+        }
+        guard var applicationMenuFrame = screen.getApplicationMenuFrame() else {
+            return false
         }
         applicationMenuFrame.size.width += applicationMenuFrame.origin.x - screen.frame.origin.x
         applicationMenuFrame.origin.x = screen.frame.origin.x

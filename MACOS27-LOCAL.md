@@ -80,7 +80,7 @@ the fade or retained-background checks. The user confirmed the ring and all nine
 dots returned. Subsequent testing exposed theme-transition and filled-glyph cases
 addressed below.
 
-The current build is `0.11.13-dev.2-macos27.9` (1130), with 194 tests in 40 suites
+The ninth build is `0.11.13-dev.2-macos27.9` (1130), with 194 tests in 40 suites
 passing. Iterations 8–9 additionally:
 
 - Keep glyph alpha caches across appearance changes and resolve Layout's
@@ -100,6 +100,35 @@ for iteration 8 and is disabled in the normal iteration 9 launch. Raw diagnostic
 images are not included in the source patch. The user confirmed that light-mode
 nine-dot detail, the real Dropover glyph, and theme transitions all work in
 iteration 9. The native ordering fix was confirmed in iteration 6.
+
+## Application menus mistaken for empty space (2026-10-29)
+
+Build `0.11.13-dev.2-macos27.10` (1131) protects the application-menu area when
+Accessibility cannot provide a complete measurement. Previously, a failed read
+returned `false` from `isMouseInsideApplicationMenu`, which let the click and
+hover handlers classify a visible application menu as empty bar and open Ice.
+The measurement also discarded titles whose AXEnabled value was false or
+unavailable, even though those titles still occupied space.
+
+The macOS 27 measurement now includes every title, rejects missing or malformed
+frames and menu-owner changes during the read, and suppresses empty-space
+shortcuts while geometry is unknown. The Ice button remains available. A queued
+hover reveal also rechecks its permission and menu owner before opening.
+
+All 201 core tests in 41 suites pass, including incomplete reads, missing trailing
+titles, malformed geometry, recovery, and the fallback's display boundaries.
+These are confirmed failure paths in the code, not a reproduction proving which
+one caused the user's intermittent OrbStack incident.
+
+The Release build and strict signature verification passed with a fresh derived
+data directory after the moved old module cache crashed the Swift compiler.
+Build 1131 was installed over `/Applications/Ice.app` with the same designated
+requirement. UI inspection confirmed its version and that OrbStack's File, Edit,
+and Help menus could open and be cancelled. No erroneous Ice Bar was observed
+during those checks, but the original intermittent state was not reproduced.
+Launch Services and Spotlight each report only `/Applications/Ice.app`; the old
+installed build is retained as a verified ZIP, and loose build products were
+removed after installation.
 
 ## Menu interaction investigation (2026-10-27)
 
@@ -143,7 +172,7 @@ Hardened runtime is disabled for these local builds, which are not notarized
 releases. Replacing an official or differently signed Ice can require renewing
 its Accessibility and Screen Recording grants. Iterations 3–5 use the same local
 development identity; their designated requirements match, and authorization
-has remained valid across these updates. Builds 1127–1130 retain that requirement.
+has remained valid across these updates. Builds 1127–1131 retain that requirement.
 
 ## Behavior and limits
 

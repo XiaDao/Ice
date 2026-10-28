@@ -18,6 +18,34 @@ import CoreGraphics
 ///
 /// What carries across displays is how far the menus reach from their own display's left edge.
 enum ApplicationMenuArea27 {
+    /// A partial AX read cannot prove that the rest of the bar is empty. In particular, the
+    /// trailing title may still be visible while its frame is temporarily unavailable.
+    /// Pass every menu title's frame, including disabled titles: enabled is an action state,
+    /// not an indication that the title has stopped occupying space.
+    static func measuredFrame(titleFrames: [CGRect?]) -> CGRect? {
+        guard !titleFrames.isEmpty else { return nil }
+        var result = CGRect.null
+        for frame in titleFrames {
+            guard let frame, isUsable(frame) else { return nil }
+            result = result.union(frame)
+        }
+        return isUsable(result) ? result : nil
+    }
+
+    /// Unknown menu geometry must suppress Ice's empty-space shortcuts, rather than treat the
+    /// application's menus as empty space. Native mouse events and the Ice button still work.
+    static func contains(point: CGPoint, measuredArea: CGRect?, barBounds: CGRect) -> Bool {
+        guard barBounds.contains(point) else { return false }
+        guard let measuredArea, isUsable(measuredArea), measuredArea.intersects(barBounds) else { return true }
+        return measuredArea.contains(point)
+    }
+
+    private static func isUsable(_ frame: CGRect) -> Bool {
+        frame.origin.x.isFinite && frame.origin.y.isFinite &&
+        frame.size.width.isFinite && frame.size.height.isFinite &&
+        frame.size.width > 0 && frame.size.height > 0 && !frame.isNull && !frame.isInfinite
+    }
+
     /// The menus' stretch of the given display's bar.
     ///
     /// - Parameters:
