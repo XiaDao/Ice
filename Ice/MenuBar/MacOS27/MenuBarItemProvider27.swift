@@ -40,6 +40,28 @@ enum MenuBarItemProvider27 {
     /// Accessibility calls block, so they run on their own queue, off the Swift
     /// concurrency pool (see `MenuBarItemImageCache.captureQueue`).
     private static let queue = DispatchQueue(label: "com.jordanbaird.Ice.MenuBarItemProvider27", qos: .userInitiated)
+    private static let launchProbeQueue = DispatchQueue(label: "com.jordanbaird.Ice.MenuBarLaunchProbe27", qos: .userInitiated)
+
+    /// A startup check only asks the new owners, even while a complete scan is in progress.
+    static func processesWithoutPublishedItems(_ pids: Set<pid_t>) async -> Set<pid_t> {
+        await withCheckedContinuation { continuation in
+            launchProbeQueue.async {
+                let missing = pids.filter { pid in
+                    let application = AXUIElementCreateApplication(pid)
+                    AXUIElementSetMessagingTimeout(application, 0.15)
+                    var value: CFTypeRef?
+                    guard AXUIElementCopyAttributeValue(application, kAXExtrasMenuBarAttribute as CFString, &value) == .success,
+                          let value, CFGetTypeID(value) == AXUIElementGetTypeID() else {
+                        return true
+                    }
+                    // The attribute is an AX element once its type ID has been checked.
+                    let bar = unsafeBitCast(value, to: AXUIElement.self)
+                    return (elements(bar, kAXChildrenAttribute) ?? []).isEmpty
+                }
+                continuation.resume(returning: Set(missing))
+            }
+        }
+    }
 
     private static let lock = NSLock()
     nonisolated(unsafe) private static var entries = [CGWindowID: Entry]()

@@ -52,6 +52,8 @@ final class Concealer27: ObservableObject {
     private weak var appState: AppState?
     private var observers = [NSObjectProtocol]()
     private var applyTask: Task<Void, Never>?
+    private var visibleLaunchesToCheck = [pid_t: String]()
+    private var visibleLaunchCheck: Task<Void, Never>?
     private(set) var isReordering = false
     private var suspendedUntil: ContinuousClock.Instant?
 
@@ -157,24 +159,48 @@ final class Concealer27: ObservableObject {
         // measured on macOS 27.0.1, AlDente created its item 400 ms after this fired.
         runningApplicationsObservation = NSWorkspace.shared.observe(
             \.runningApplications,
-            options: [.new]
+            options: [.old, .new]
         ) { [weak self] _, change in
-            guard change.kind == .insertion else {
+            guard change.kind == .insertion || change.kind == .setting else {
                 return
             }
+            // A full replacement can also convey a launch. Diff it before starting grace
+            // periods so the already running hidden apps do not flash back into view.
+            let previous: Set<pid_t>
+            if change.kind == .setting {
+                guard let old = change.oldValue else {
+                    Task { @MainActor in self?.update() }
+                    return
+                }
+                previous = Set(old.map(\.processIdentifier))
+            } else {
+                previous = []
+            }
             let launched = (change.newValue ?? []).compactMap { application -> (String, pid_t)? in
-                guard let bundleID = application.bundleIdentifier else {
+                guard let bundleID = application.bundleIdentifier,
+                      !previous.contains(application.processIdentifier) else {
                     return nil
                 }
                 return (bundleID, application.processIdentifier)
             }
             Task { @MainActor in
+                guard let self else { return }
+                let layout = self.savedLayout
+                var launchingVisible = [pid_t: String]()
                 for (bundleID, pid) in launched {
-                    if self?.backend == .native {
-                        self?.reapplyWhileLaunching(bundleID: bundleID)
+                    if self.backend == .native {
+                        self.reapplyWhileLaunching(bundleID: bundleID)
+                    } else if layout[bundleID, default: .visible] == .visible {
+                        launchingVisible[pid] = bundleID
                     } else {
-                        self?.showWhileLaunching(bundleID: bundleID, pid: pid)
+                        self.showWhileLaunching(bundleID: bundleID, pid: pid)
                     }
+                }
+                // Waiting for didLaunch is too late for some status items: MenuBarAgent
+                // can create them at zero size under the old assertion.
+                if !launchingVisible.isEmpty {
+                    self.update(launchingVisible: Set(launchingVisible.values))
+                    self.checkVisibleLaunches(launchingVisible)
                 }
             }
         }
@@ -236,7 +262,7 @@ final class Concealer27: ObservableObject {
     }
 
     /// Derives what to conceal from Ice's sections and applies it.
-    func update(force: Bool = false) {
+    func update(force: Bool = false, launchingVisible: Set<String> = []) {
         guard !isReordering || force else { return }
         guard let appState else {
             return
@@ -257,7 +283,8 @@ final class Concealer27: ObservableObject {
         }
         let applications = NSWorkspace.shared.runningApplications
         let running = Set(applications.compactMap(\.bundleIdentifier))
-        let layout = SectionLayout27.effectiveLayout(observed: [:], saved: savedLayout, running: running)
+        let saved = savedLayout
+        let layout = SectionLayout27.effectiveLayout(observed: [:], saved: saved, running: running)
         let target = ConcealmentPlanner27.concealedSets(
             layout: layout,
             state: revealState(appState),
@@ -307,7 +334,10 @@ final class Concealer27: ObservableObject {
             case .assessment:
                 native.releaseAll()
                 do {
-                    try await controller.apply(target: target, running: running)
+                    let candidates = ConcealmentPlanner27.assessmentCandidates(
+                        running: running, launching: launchingVisible, saved: saved
+                    )
+                    try await controller.apply(target: target, running: candidates)
                 } catch {
                     logger.error("Could not apply concealment: \(error, privacy: .public)")
                 }
@@ -322,6 +352,48 @@ final class Concealer27: ObservableObject {
             try? await Task.sleep(for: .milliseconds(400))
             await self?.appState?.itemManager.cacheItemsIfNeeded()
             await self?.checkStuckOverflow()
+        }
+    }
+
+    /// Workspace can report an accessory app after its first status item was suppressed.
+    /// If widening the allowlist did not publish that item, lift the assertion once to let
+    /// MenuBarAgent lay it out, then restore the same sections.
+    private func checkVisibleLaunches(_ applications: [pid_t: String]) {
+        guard backend == .assessment, isConcealing else { return }
+        for (pid, bundleID) in applications {
+            if savedLayout[bundleID] == .visible
+                || NSRunningApplication(processIdentifier: pid)?.activationPolicy == .accessory {
+                visibleLaunchesToCheck[pid] = bundleID
+            }
+        }
+        scheduleVisibleLaunchCheck()
+    }
+
+    private func scheduleVisibleLaunchCheck() {
+        guard visibleLaunchCheck == nil, !visibleLaunchesToCheck.isEmpty else { return }
+        visibleLaunchCheck = Task { [weak self] in
+            try? await Task.sleep(for: Self.settleAfterChange)
+            guard let self else { return }
+            defer {
+                self.visibleLaunchCheck = nil
+                self.scheduleVisibleLaunchCheck()
+            }
+            await self.applyTask?.value
+            let pending = self.visibleLaunchesToCheck
+            self.visibleLaunchesToCheck.removeAll()
+            guard self.backend == .assessment, self.controller.isActive,
+                  self.suspendedUntil == nil, !self.isReordering else { return }
+            let missing = await MenuBarItemProvider27.processesWithoutPublishedItems(Set(pending.keys))
+            let layout = self.savedLayout
+            guard self.backend == .assessment, self.controller.isActive,
+                  self.suspendedUntil == nil, !self.isReordering,
+                  missing.contains(where: { pid in
+                      guard let bundleID = pending[pid] else { return false }
+                      return layout[bundleID, default: .visible] == .visible
+                          && NSRunningApplication(processIdentifier: pid)?.bundleIdentifier == bundleID
+                  }) else { return }
+            self.logger.notice("Refreshing the menu bar after a visible application launch")
+            await self.suspendReleased(for: .milliseconds(600))
         }
     }
 

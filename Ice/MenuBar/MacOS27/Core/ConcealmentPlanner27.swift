@@ -47,6 +47,18 @@ enum ConcealmentPlanner27 {
         running.subtracting(concealed).sorted()
     }
 
+    /// Visible apps with saved positions can be allowed before they launch. The early workspace
+    /// notification also supplies first-time apps before they appear in the running snapshot.
+    static func assessmentCandidates(
+        running: Set<String>,
+        launching: Set<String>,
+        saved: [String: MacOS27Section]
+    ) -> Set<String> {
+        running
+            .union(SectionLayout27.bundles(in: [.visible], layout: saved))
+            .union(launching.filter { saved[$0, default: .visible] == .visible })
+    }
+
     /// The applications concealed while all of the given sets are live.
     static func effectivelyConcealed(sets: [Set<String>]) -> Set<String> {
         guard let first = sets.first else {

@@ -31,6 +31,25 @@ struct ConcealmentPlanner27Tests {
         #expect(ConcealmentPlanner27.allowlist(concealing: ["b"], running: ["z", "a", "b"]) == ["a", "z"])
     }
 
+    @Test("A saved visible app may publish its item while an old assertion is still active")
+    func reopeningVisibleApp() {
+        let candidates = ConcealmentPlanner27.assessmentCandidates(
+            running: ["hidden.app"], launching: [], saved: layout
+        )
+        #expect(ConcealmentPlanner27.allowlist(concealing: ["hidden.app"], running: candidates) == ["visible.app"])
+    }
+
+    @Test("A first-time visible app is allowed before appearing in the running snapshot")
+    func firstLaunchDoesNotRevealSavedHiddenApps() {
+        let candidates = ConcealmentPlanner27.assessmentCandidates(
+            running: ["existing.app", "hidden.app"],
+            launching: ["new.app", "always.app"],
+            saved: layout
+        )
+        #expect(ConcealmentPlanner27.allowlist(concealing: ["hidden.app"], running: candidates)
+                == ["existing.app", "new.app", "visible.app"])
+    }
+
     @Test("Live assertions conceal only what all of them conceal")
     func effectivelyConcealed() {
         #expect(ConcealmentPlanner27.effectivelyConcealed(sets: [["b", "c"], ["c"]]) == ["c"])
